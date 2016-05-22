@@ -98,7 +98,7 @@ class ConjugateGradient(Solver):
             print " iter\t\t   cost val\t    grad. norm"
 
         # Calculate initial cost-related quantities
-        print("objective(x):{}".format(objective(x)))
+        #print("objective(x):{}".format(objective(x)))
         cost = objective(x)
         grad = gradient(x)
         gradnorm = man.norm(x, grad)

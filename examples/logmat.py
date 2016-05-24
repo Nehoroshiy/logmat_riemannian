@@ -73,7 +73,7 @@ class LogisticMF():
             user_vec_deriv, user_bias_deriv = self.deriv(True)
             user_vec_deriv_sum += np.square(user_vec_deriv)
             user_bias_deriv_sum += np.square(user_bias_deriv)
-            vec_step_size = 2.0*1e-9#self.gamma / np.sqrt(user_vec_deriv_sum)
+            vec_step_size = 1e-10#self.gamma / np.sqrt(user_vec_deriv_sum)
             bias_step_size = self.gamma / np.sqrt(user_bias_deriv_sum)
             self.user_vectors += vec_step_size * user_vec_deriv
             self.user_biases += bias_step_size * user_bias_deriv
@@ -84,7 +84,7 @@ class LogisticMF():
             item_vec_deriv, item_bias_deriv = self.deriv(False)
             item_vec_deriv_sum += np.square(item_vec_deriv)
             item_bias_deriv_sum += np.square(item_bias_deriv)
-            vec_step_size = 2.0*1e-9#self.gamma / np.sqrt(item_vec_deriv_sum)
+            vec_step_size = 1e-10#self.gamma / np.sqrt(item_vec_deriv_sum)
             bias_step_size = self.gamma / np.sqrt(item_bias_deriv_sum)
             self.item_vectors += vec_step_size * item_vec_deriv
             self.item_biases += bias_step_size * item_bias_deriv
@@ -191,7 +191,7 @@ class FixedRiemannianLogisticMF():
             #x_egrad_square = np.square(x_egrad[0].dot(x_egrad[1]))
 
             #x_deriv_sum = self.manifold.lincomb(x, 1.0, x_deriv_sum, 1.0, x_egrad_square)
-            x_step_size = 2.0*1e-9#self.gamma / np.sqrt(self.manifold.norm(x, x_deriv_sum))
+            x_step_size = 1e-10#self.gamma / np.sqrt(self.manifold.norm(x, x_deriv_sum))
             #user_vec_deriv_sum += np.square(user_vec_deriv)
             user_bias_deriv_sum += np.square(user_bias_deriv)
             #user_vec_step_size = self.gamma / np.sqrt(user_vec_deriv_sum)
@@ -307,7 +307,7 @@ class RiemannianLogisticMF():
 
 
             x_deriv_sum = self.manifold.lincomb(x, 1.0, x_deriv_sum, 1.0, x_egrad_square)
-            x_step_size = self.gamma / (np.sqrt(self.manifold.norm(x, x_deriv_sum)) + 1e-8)
+            x_step_size = 1e-10#self.gamma / (np.sqrt(self.manifold.norm(x, x_deriv_sum)) + 1e-8)
             #user_vec_deriv_sum += np.square(user_vec_deriv)
             user_bias_deriv_sum += np.square(user_bias_deriv)
             #user_vec_step_size = self.gamma / np.sqrt(user_vec_deriv_sum)
@@ -329,6 +329,29 @@ class RiemannianLogisticMF():
 
             print 'iteration %i finished in %f seconds' % (i + 1, t1 - t0)
 
+
+    def deriv(self):
+        user_vec_deriv = np.dot(self.counts, self.item_vectors)
+        user_bias_deriv = np.expand_dims(np.sum(self.counts, axis=1), 1)
+        item_vec_deriv = np.dot(self.counts.T, self.user_vectors)
+        item_bias_deriv = np.expand_dims(np.sum(self.counts, axis=0), 1)
+        A = np.dot(self.user_vectors, self.item_vectors.T)
+        A += self.user_biases
+        A += self.item_biases.T
+        A = self.ones / (self.ones + np.exp(-A))
+        #A = np.exp(A)
+        #A /= (A + self.ones)
+        A = (self.counts + self.ones) * A
+
+        user_vec_deriv -= np.dot(A, self.item_vectors)
+        user_bias_deriv -= np.expand_dims(np.sum(A, axis=1), 1)
+
+        item_vec_deriv -= np.dot(A.T, self.user_vectors)
+        item_bias_deriv -= np.expand_dims(np.sum(A, axis=0), 1)
+        # L2 regularization
+        user_vec_deriv -= self.reg_param * self.user_vectors
+        item_vec_deriv -= self.reg_param * self.item_vectors
+        return (user_vec_deriv, item_vec_deriv), (user_bias_deriv, item_bias_deriv)
 
 
     def log_likelihood(self):
@@ -371,7 +394,7 @@ if __name__ == "__main__":
     folder_path = "lastfm-dataset-360K"
     mat_path = os.path.join(folder_path, 'cut.tsv')
 
-    M, N = 500, 500
+    M, N = 1000, 1000
 
     mat = load_matrix_sparse(mat_path, M, N)
     mat = np.array(mat[:M, :N].todense())
@@ -383,9 +406,14 @@ if __name__ == "__main__":
     n_iters = 50
     lmf = LogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
     rlmf = RiemannianLogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
+    frlmf = FixedRiemannianLogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
 
-    print("train Riemannian Logistic MF:")
+    print("train 2 factor Riemannian Logistic MF:")
     rlmf.train_model()
+    print("end of training.")
+
+    print("train 3 factor Riemannian Logistic MF:")
+    frlmf.train_model()
     print("end of training.")
 
     print("train Logistic MF:")
@@ -393,7 +421,9 @@ if __name__ == "__main__":
     print("end of training.")
 
 
-    llmf, llrmf = lmf.loss_history, rlmf.loss_history
+    llmf, llrmf, llfrmf = lmf.loss_history, rlmf.loss_history, frlmf.loss_history
     plt.plot(np.arange(len(llmf)), llmf, 'r')
     plt.plot(np.arange(len(llrmf)), llrmf, 'g')
+    plt.plot(np.arange(len(llfrmf)), llfrmf, 'b')
+    plt.legend(['Alternating', 'GH^T', 'USV^T'], loc=2)
     plt.show()

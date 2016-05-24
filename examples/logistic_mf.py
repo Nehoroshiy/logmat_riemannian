@@ -17,27 +17,6 @@ from pymanopt.manifolds import FixedRankEmbeeded2Factors
 from pymanopt.solvers import TrustRegions, ConjugateGradient, SteepestDescent
 
 
-def load_matrix(filename, num_users, num_items):
-    t0 = time.time()
-    counts = np.zeros((num_users, num_items))
-    total = 0.0
-    num_zeros = num_users * num_items
-    for i, line in enumerate(open(filename, 'r')):
-        user, item, count = line.strip().split('\t')
-        user = int(user)
-        item = int(item)
-        count = float(count)
-        counts[user][item] = count
-        total += count
-        num_zeros -= 1
-    alpha = num_zeros / total
-    print 'alpha %.2f' % alpha
-    counts *= alpha
-    t1 = time.time()
-    print 'Finished loading matrix in %f seconds' % (t1 - t0)
-    return counts
-
-
 def load_matrix_sparse(filename='cut.tsv', num_users=None, num_items=None):
     t0 = time.time()
     matrix_data = pd.read_csv(filename, sep='\t', header=None, names=['i', 'j', 'counts'], dtype={'counts': np.float})
@@ -54,15 +33,6 @@ def load_matrix_sparse(filename='cut.tsv', num_users=None, num_items=None):
     print('Maximum element is {}'.format(counts.max()))
     del matrix_data
     return counts
-
-
-def stupid_load(filename, lines=5000):
-    with open("stupid-" + filename, 'w') as f:
-        for i, line in enumerate(open(filename, 'r')):
-            if i >= lines:
-                break
-            f.write(line + '\n')
-    return None
 
 
 def hadamard(left, right, r):
@@ -83,7 +53,7 @@ class LogisticMF():
     def __init__(self, counts, num_factors, reg_param=0.6, gamma=1.0,
                  iterations=30, minstepsize=1e-9):
         self.counts = counts
-        N = 100
+        N = 20000
         self.counts = counts[:N, :N]
         self.num_users = self.counts.shape[0]
         self.num_items = self.counts.shape[1]
@@ -115,17 +85,6 @@ class LogisticMF():
         print("how much item outer? {}".format(np.average(np.isclose(right[:, -1], 1))))
         print('user delta: {} in norm, {} in max abs'.format(la.norm(left[:, -2] - 1), np.max(np.abs(left[:, -2] - 1))))
         print('item delta: {} in norm, {} in max abs'.format(la.norm(right[:, -1] - 1), np.max(np.abs(right[:, -1] - 1))))
-
-    def evaluate_lowrank_np(self, U, V, item):
-        if hasattr(item, '__len__') and len(item) == 2 and len(item[0]) == len(item[1]):
-            rows = U[item[0], :]
-            cols = V[:, item[1]]
-            data = (rows * cols.T).sum(1)
-            assert(data.size == len(item[0]))
-            shape = (U.shape[0], V.shape[1])
-            return coo_matrix((data, tuple(item)), shape=shape).tocsr()
-        else:
-            raise ValueError('__getitem__ now supports only indices set')
 
     def evaluate_lowrank(self, U, V, item, fast=False):
         if hasattr(item, '__len__') and len(item) == 2 and len(item[0]) == len(item[1]):

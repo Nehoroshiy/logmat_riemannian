@@ -501,7 +501,7 @@ class RiemannianLogisticMF():
             x_deriv_sum = self.manifold.lincomb(x, 1.0, x_deriv_sum, 1.0, x_egrad_squared)
 
             ambient_deriv_sum = self.manifold.tangent2ambient(x, x_deriv_sum)
-            average_deriv_sum = 1.0 * sum_lowrank(ambient_deriv_sum) / (np.prod(self.counts.shape))
+            average_deriv_sum = 1.0 * sum_lowrank(ambient_deriv_sum) / np.prod(self.counts.shape)
 
             x_step_size = self.gamma / (np.sqrt(average_deriv_sum))
 

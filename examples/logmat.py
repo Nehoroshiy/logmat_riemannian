@@ -20,6 +20,11 @@ import matplotlib.pyplot as plt
 
 SCONST = 1.0
 
+def sum_lowrank(lowrank_matrix):
+    u, v = lowrank_matrix
+    return u.sum(0).dot(v.sum(0))
+
+
 class LineSearchAdaptive(object):
     def __init__(self):
         self._contraction_factor = 0.5
@@ -469,29 +474,52 @@ class RiemannianLogisticMF():
                        np.zeros((self.num_items, self.num_factors)))
         user_bias_deriv_sum = np.zeros((self.num_users, 1))
         item_bias_deriv_sum = np.zeros((self.num_items, 1))
+        x_ = (self.user_vectors, self.item_vectors)
+
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+
+        momentum = (np.zeros((self.num_users, self.num_factors)),
+            np.zeros((self.num_items, self.num_factors)))
+
+        velocity = (np.zeros((self.num_users, self.num_factors)),
+            np.zeros((self.num_items, self.num_factors)))
+
         for i in range(self.iterations):
             x = (self.user_vectors, self.item_vectors)
+
+            x_deriv_sum = self.manifold.transp(x_, x, x_deriv_sum)
+            momentum = self.manifold.transp(x_, x, momentum)
+            velocity = self.manifold.transp(x_, x, velocity)
+
             t0 = time.time()
             # Solve for users and items
             x_deriv, (user_bias_deriv, item_bias_deriv) = self.deriv()
             x_egrad = self.manifold.egrad2rgrad(x, x_deriv)
 
+            x_deriv_squared = tuple(dx**2 for dx in x_deriv)
 
-            x_deriv_sum = tuple(deriv_sum_elem + np.square(deriv_elem) for (deriv_sum_elem, deriv_elem) in zip(x_deriv_sum, x_deriv))
-            x_step_sizes = tuple(self.gamma / np.sqrt(xds) for xds in x_deriv_sum)
-            #user_vec_deriv_sum += np.square(user_vec_deriv)
+            x_egrad_squared = self.manifold.egrad2rgrad(x, x_deriv_squared)
+
+            momentum = self.manifold.lincomb(x, beta1, momentum, (1.0 - beta1), x_egrad)
+            velocity = self.manifold.lincomb(x, beta2, velocity, (1.0 - beta2), x_egrad_squared)
+
+            shifted_momentum = self.manifold.lincomb(x, 1.0 / (1 - beta1), momentum)
+            shifted_velocity = self.manifold.lincomb(x, 1.0 / (1 - beta2), velocity)
+
+            ambient_velocity = self.manifold.tangent2ambient(x, shifted_velocity)
+            average_velocity = 1.0 * sum_lowrank(ambient_velocity) / np.prod(self.counts.shape)
+
+            x_step_size = self.gamma / (average_velocity + eps)
+
+            x_deriv_sum = self.manifold.lincomb(x, 1.0, x_deriv_sum, 1.0, x_egrad_squared)
+
             user_bias_deriv_sum += np.square(user_bias_deriv)
-            #user_vec_step_size = self.gamma / np.sqrt(user_vec_deriv_sum)
             user_bias_step_size = self.gamma / np.sqrt(user_bias_deriv_sum)
 
-            #item_vec_deriv_sum += np.square(item_vec_deriv)
             item_bias_deriv_sum += np.square(item_bias_deriv)
-            #item_vec_step_size = self.gamma / np.sqrt(user_vec_deriv_sum)
             item_bias_step_size = self.gamma / np.sqrt(user_bias_deriv_sum)
 
-            #user_proj_deriv, item_proj_deriv = self.manifold.egrad2rgrad(X, (user_vec_deriv, item_vec_deriv))
-            modified_egrad = tuple((step * param for (step, param) in zip(x_step_sizes, x_deriv)))
-            #modified_egrad = self.manifold.egrad2rgrad(x, modified_egrad)
+            modified_egrad = self.manifold.lincomb(x, x_step_size, shifted_momentum)
 
             self.user_vectors, self.item_vectors = self.manifold.retr(x, modified_egrad)
             self.user_biases += user_bias_step_size * user_bias_deriv
@@ -809,13 +837,14 @@ if __name__ == "__main__":
     user_b = rnd.randn(M, 1) / SCONST
     item_b = rnd.randn(N, 1) / SCONST
 
-    print("train 2 factor Wild Logistic MF")
-    wmf.train_model(x0=(np.hstack((left, user_ones, user_b)),
-                        np.hstack((right, item_b, item_ones))))
-    print("end of training.")
 
     print("train 2 factor Riemannian Logistic MF:")
     rlmf.train_model(x0=(left, right))
+    print("end of training.")
+
+    print("train 2 factor Wild Logistic MF")
+    wmf.train_model(x0=(np.hstack((left, user_ones, user_b)),
+                        np.hstack((right, item_b, item_ones))))
     print("end of training.")
 
     #print("train 3 factor Riemannian Logistic MF:")

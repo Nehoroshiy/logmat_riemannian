@@ -488,8 +488,6 @@ class RiemannianLogisticMF():
             x = (self.user_vectors, self.item_vectors)
 
             x_deriv_sum = self.manifold.transp(x_, x, x_deriv_sum)
-            momentum = self.manifold.transp(x_, x, momentum)
-            velocity = self.manifold.transp(x_, x, velocity)
 
             t0 = time.time()
             # Solve for users and items
@@ -500,18 +498,12 @@ class RiemannianLogisticMF():
 
             x_egrad_squared = self.manifold.egrad2rgrad(x, x_deriv_squared)
 
-            momentum = self.manifold.lincomb(x, beta1, momentum, (1.0 - beta1), x_egrad)
-            velocity = self.manifold.lincomb(x, beta2, velocity, (1.0 - beta2), x_egrad_squared)
-
-            shifted_momentum = self.manifold.lincomb(x, 1.0 / (1 - beta1), momentum)
-            shifted_velocity = self.manifold.lincomb(x, 1.0 / (1 - beta2), velocity)
-
-            ambient_velocity = self.manifold.tangent2ambient(x, shifted_velocity)
-            average_velocity = 1.0 * sum_lowrank(ambient_velocity) / np.prod(self.counts.shape)
-
-            x_step_size = self.gamma / (average_velocity + eps)
-
             x_deriv_sum = self.manifold.lincomb(x, 1.0, x_deriv_sum, 1.0, x_egrad_squared)
+
+            ambient_deriv_sum = self.manifold.tangent2ambient(x, x_deriv_sum)
+            average_deriv_sum = 1.0 * sum_lowrank(ambient_deriv_sum) / (np.prod(self.counts.shape))
+
+            x_step_size = self.gamma / (np.sqrt(average_deriv_sum))
 
             user_bias_deriv_sum += np.square(user_bias_deriv)
             user_bias_step_size = self.gamma / np.sqrt(user_bias_deriv_sum)
@@ -519,7 +511,7 @@ class RiemannianLogisticMF():
             item_bias_deriv_sum += np.square(item_bias_deriv)
             item_bias_step_size = self.gamma / np.sqrt(user_bias_deriv_sum)
 
-            modified_egrad = self.manifold.lincomb(x, x_step_size, shifted_momentum)
+            modified_egrad = self.manifold.lincomb(x, x_step_size, x_egrad)
 
             self.user_vectors, self.item_vectors = self.manifold.retr(x, modified_egrad)
             self.user_biases += user_bias_step_size * user_bias_deriv

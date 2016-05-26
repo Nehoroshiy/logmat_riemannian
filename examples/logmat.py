@@ -294,7 +294,7 @@ class FixedRiemannianLogisticMF():
         self.num_users = counts.shape[0]
         self.num_items = counts.shape[1]
         self.manifold = FixedRankEmbeeded(counts.shape[0], counts.shape[1], num_factors)
-        self.num_factors = num_factors
+        self.num_factors = num_factors + 1
         self.iterations = iterations
         self.reg_param = reg_param
         self.gamma = gamma
@@ -501,7 +501,7 @@ class RiemannianLogisticMF():
             x_deriv_sum = self.manifold.lincomb(x, 1.0, x_deriv_sum, 1.0, x_egrad_squared)
 
             ambient_deriv_sum = self.manifold.tangent2ambient(x, x_deriv_sum)
-            average_deriv_sum = 1.0 * sum_lowrank(ambient_deriv_sum) / np.prod(self.counts.shape)
+            average_deriv_sum = 1.0 * sum_lowrank(ambient_deriv_sum) / (np.prod(self.counts.shape))
 
             x_step_size = self.gamma / (np.sqrt(average_deriv_sum))
 
@@ -623,7 +623,7 @@ class WildLogisticMF():
         self.counts = counts
         self.num_users = self.counts.shape[0]
         self.num_items = self.counts.shape[1]
-        self.num_factors = num_factors + 2
+        self.num_factors = num_factors
         self.iterations = iterations
         self.minstepsize = minstepsize
         self.reg_param = reg_param
@@ -631,7 +631,7 @@ class WildLogisticMF():
         self._bootstrap_problem()
 
     def _bootstrap_problem(self):
-        self.manifold = FixedRankEmbeeded2Factors(self.num_users, self.num_items, self.num_factors)
+        self.manifold = FixedRankEmbeeded2Factors(self.num_users, self.num_items, self.num_factors + 1)
         self.solver = ConjugateGradient(maxiter=self.iterations, minstepsize=self.minstepsize)
 
     def train_model(self, x0=None):
@@ -646,31 +646,20 @@ class WildLogisticMF():
                                                        self.num_factors))
             item_vectors = np.random.normal(size=(self.num_items,
                                                        self.num_factors))
-            user_ones = np.ones((self.num_users, 1)) * SCONST
-            item_ones = np.ones((self.num_items, 1)) * SCONST
             user_biases = np.random.normal(size=(self.num_users, 1)) / SCONST
             item_biases = np.random.normal(size=(self.num_items, 1)) / SCONST
-            x0 = (np.hstack((user_vectors, user_ones, user_biases)),
-                  np.hstack((item_vectors, item_biases, item_ones)))
+            x0 = (np.hstack((user_vectors, user_biases)),
+                  np.hstack((item_vectors, item_biases)))
         else:
             x0 = x0
         (left, right), self.loss_history = self.solver.solve(problem, x=x0)
 
-        self.user_vectors = left[:, :-2]
-        self.item_vectors = right[:, :-2]
+        self.user_vectors = left[:, :-1]
+        self.item_vectors = right[:, :-1]
         self.user_biases = left[:, -1]
-        self.item_biases = right[:, -2]
+        self.item_biases = right[:, -1]
         print('U norm: {}'.format(la.norm(self.user_vectors)))
         print('V norm: {}'.format(la.norm(self.item_vectors)))
-        print("how much user outer? {}".format(np.average(np.isclose(left[:, -2], 1))))
-        print("how much item outer? {}".format(np.average(np.isclose(right[:, -1], 1))))
-        print('user delta: {} in norm, {} in max abs'.format(la.norm(left[:, -2] - 1), np.max(np.abs(left[:, -2] - 1))))
-        print('item delta: {} in norm, {} in max abs'.format(la.norm(right[:, -1] - 1), np.max(np.abs(right[:, -1] - 1))))
-        C = 1000
-        smm = C * np.sum(np.square(left[:, -2] - SCONST))
-        smm += C * np.sum(np.square(right[:, -1] - SCONST))
-        print('smm: {}'.format(smm))
-        print('ll func: {}'.format(self.ll_func()))
 
 
 
@@ -726,19 +715,21 @@ class WildLogisticMF():
         return loglik
 
     def log_likelihood(self):
-        Users = self.L[:, :-2]
-        Items = self.R[:, :-2]
-        UserBiases = self.L[:, -1]
-        ItemBiases = self.R[:, -2]
-        UserOuter = self.L[:, -2]
-        ItemOuter = self.R[:, -1]
+        Users = self.L[:, :-1]
+        Items = self.R[:, :-1]
+        UserBiases = self.L[:, -1].reshape((-1, 1))
+        ItemBiases = self.R[:, -1].reshape((-1, 1))
+        #UserOuter = self.L[:, -2]
+        #ItemOuter = self.R[:, -1]
 
         ## A = T.dot(Users, Items.T)
         ## A += UserBiases
         ## A += ItemBiases.T
         ## B = A * self.counts
         ## loglik = T.sum(B)
-        A = T.dot(self.L, self.R.T)
+        A = T.dot(self.L[:, :-1], (self.R[:, :-1]).T)
+        A = T.inc_subtensor(A[:, :], UserBiases)
+        A = T.inc_subtensor(A[:, :], ItemBiases.T)
         B = A * self.counts
         loglik = T.sum(B)
 
@@ -771,12 +762,194 @@ class WildLogisticMF():
 
 
         # L2 regularization
-        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.L[:, :-2]))
-        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.R[:, :-2]))
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.L[:, :-1]))
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.R[:, :-1]))
 
         # we need strictly maintain UserOuter and ItemOuter be ones, just to ensure they properly
         # outer products with biases
-        C = 10
+        #C = 10
+        #loglik -= C * T.sum(T.abs_(self.L[:, -2] - SCONST))
+        #loglik -= C * T.sum(T.abs_(self.R[:, -1] - SCONST))
+
+        # Return negation of LogLikelihood cause we will minimize cost
+        return -loglik
+
+    def print_vectors(self):
+        user_vecs_file = open('logmf-user-vecs-%i' % self.num_factors, 'w')
+        for i in range(self.num_users):
+            vec = ' '.join(map(str, self.user_vectors[i]))
+            line = '%i\t%s\n' % (i, vec)
+            user_vecs_file.write(line)
+        user_vecs_file.close()
+        item_vecs_file = open('logmf-item-vecs-%i' % self.num_factors, 'w')
+        for i in range(self.num_items):
+            vec = ' '.join(map(str, self.item_vectors[i]))
+            line = '%i\t%s\n' % (i, vec)
+            item_vecs_file.write(line)
+        item_vecs_file.close()
+
+class UsvRiemannianLogisticMF():
+    def __init__(self, counts, num_factors, reg_param=0.6, gamma=1.0,
+                 iterations=30, minstepsize=1e-9):
+        self.counts = counts
+        self.num_users = self.counts.shape[0]
+        self.num_items = self.counts.shape[1]
+        self.num_factors = num_factors + 1
+        self.iterations = iterations
+        self.minstepsize = minstepsize
+        self.reg_param = reg_param
+        self.gamma = gamma
+        self._bootstrap_problem()
+
+    def _bootstrap_problem(self):
+        self.manifold = FixedRankEmbeeded(self.num_users, self.num_items, self.num_factors)
+        self.solver = ConjugateGradient(maxiter=self.iterations, minstepsize=self.minstepsize)
+
+    def train_model(self, x0=None):
+        self.U = T.matrix('U')
+        self.S = T.matrix('S')
+        self.V = T.matrix('V')
+        problem = Problem(man=self.manifold,
+                          theano_cost=self.log_likelihood(),
+                          theano_arg=[self.U, self.S, self.V.T])
+
+        if x0 is None:
+            user_vectors = la.qr(np.random.normal(size=(self.num_users,
+                                                       self.num_factors)))[0]
+            item_vectors = la.qr(np.random.normal(size=(self.num_items,
+                                                       self.num_factors)))[0]
+            s = rnd.random(self.num_factors)
+            s = np.sort(s)[::-1]
+            middle = np.diag(s)
+            x0 = (np.hstack((user_vectors, user_biases)),
+                  np.hstack((item_vectors, item_biases)))
+        else:
+            x0 = x0
+        (left, right), self.loss_history = self.solver.solve(problem, x=x0)
+
+        self.user_vectors = left[:, :-1]
+        self.item_vectors = right[:, :-1]
+        self.user_biases = left[:, -1]
+        self.item_biases = right[:, -1]
+        print('U norm: {}'.format(la.norm(self.user_vectors)))
+        print('V norm: {}'.format(la.norm(self.item_vectors)))
+        #print("how much user outer? {}".format(np.average(np.isclose(left[:, -2], 1))))
+        #print("how much item outer? {}".format(np.average(np.isclose(right[:, -1], 1))))
+        #print('user delta: {} in norm, {} in max abs'.format(la.norm(left[:, -2] - 1), np.max(np.abs(left[:, -2] - 1))))
+        #print('item delta: {} in norm, {} in max abs'.format(la.norm(right[:, -1] - 1), np.max(np.abs(right[:, -1] - 1))))
+        #C = 1000
+        #smm = C * np.sum(np.square(left[:, -2] - SCONST))
+        #smm += C * np.sum(np.square(right[:, -1] - SCONST))
+        #print('smm: {}'.format(smm))
+        #print('ll func: {}'.format(self.ll_func()))
+
+
+
+    def evaluate_lowrank(self, U, V, item, fast=False):
+        if hasattr(item, '__len__') and len(item) == 2 and len(item[0]) == len(item[1]):
+            if fast:
+                rows = U[item[0], :]
+                cols = V[item[1], :]
+                data = (rows * cols).sum(1)
+                return data
+            else:
+                idx_argsort = item[0].argsort()
+                item = (item[0][idx_argsort], item[1][idx_argsort])
+
+                vals, idxs, counts = [theano.shared(it) for it in\
+                                      np.unique(item[0], return_index=True, return_counts=True)]
+                output = T.zeros(int(np.max(counts.get_value())))
+                it1 = theano.shared(item[1])
+
+                def process_partial_dot(row_idx, out, U, V, item):
+                    partial_dot = T.dot(U[vals[row_idx], :], V[item[idxs[row_idx]: idxs[row_idx] + counts[row_idx]], :].T)
+                    return T.set_subtensor(out[:counts[row_idx]], partial_dot)
+                parts, updates = theano.scan(fn=process_partial_dot,
+                                             outputs_info=output,
+                                             sequences=T.arange(vals.size),
+                                             non_sequences=[U, V, it1])
+                mask = np.ones((vals.get_value().size, int(np.max(counts.get_value()))))
+                for i, count in enumerate(counts.get_value()):
+                    mask[i, count:] = 0
+                return parts[theano.shared(mask).nonzero()].ravel()
+        else:
+            raise ValueError('__getitem__ now supports only indices set')
+
+    def ll_func(self):
+        loglik = 0
+        A = np.dot(self.user_vectors, self.item_vectors.T)
+        A += self.user_biases
+        A += self.item_biases.T
+        B = A * self.counts
+        loglik += np.sum(B)
+
+        #A = np.exp(A)
+        #A += self.ones
+
+        #A = np.log(A)
+        A = accurate_log_exp1(A)
+        A = (self.counts + 1) * A
+        loglik -= np.sum(A)
+
+        # L2 regularization
+        loglik -= 0.5 * self.reg_param * np.sum(np.square(self.user_vectors))
+        loglik -= 0.5 * self.reg_param * np.sum(np.square(self.item_vectors))
+        return loglik
+
+    def log_likelihood(self):
+        Users = self.L[:, :-1]
+        Items = self.R[:, :-1]
+        UserBiases = self.L[:, -1].reshape((-1, 1))
+        ItemBiases = self.R[:, -1].reshape((-1, 1))
+        #UserOuter = self.L[:, -2]
+        #ItemOuter = self.R[:, -1]
+
+        ## A = T.dot(Users, Items.T)
+        ## A += UserBiases
+        ## A += ItemBiases.T
+        ## B = A * self.counts
+        ## loglik = T.sum(B)
+        A = T.dot(self.L[:, :-1], (self.R[:, :-1]).T)
+        A = T.inc_subtensor(A[:, :], UserBiases)
+        A = T.inc_subtensor(A[:, :], ItemBiases.T)
+        B = A * self.counts
+        loglik = T.sum(B)
+
+        # A implicitly stored as self.L @ self.R.T
+        # loglik = T.sum(A * self.counts) => sum over nonzeros only
+        #print('nnz size: {}'.format(self.counts.nonzero()[0].size))
+        #loglik = T.dot(self.evaluate_lowrank(self.L, self.R, self.counts.nonzero(), fast=False),
+        #          np.array(self.counts[self.counts.nonzero()]).ravel())
+
+        A = T.exp(A)
+        A += 1
+        A = T.log(A)
+        # There we use Taylor series ln(exp(x) + 1) = ln(2) + x/2 + x^2/8 + O(x^4) at x=0
+        # ln(2)
+        #const_term = (T.ones((self.num_users, 1)) * np.log(2), T.ones((self.num_items, 1)))
+        # x/2
+        #first_order_term = (0.5 * self.L, 0.5 * self.R)
+        # x^2/8
+        #second_order_term = hadamard((self.L, self.R), (self.L, self.R), self.num_factors)
+        #second_order_term = tuple(factor / 8.0 for factor in second_order_term)
+
+        #grouped_factors = list(zip(const_term, first_order_term, second_order_term))
+        #A = (T.concatenate(grouped_factors[0], axis=1), T.concatenate(grouped_factors[1], axis=1))
+
+        A = (self.counts + 1) * A
+        loglik -= T.sum(A)
+        #loglik -= sum_lowrank(A)
+        #loglik -= T.dot(self.evaluate_lowrank(A[0], A[1], self.counts.nonzero(), fast=False),
+        #          np.array(self.counts[self.counts.nonzero()]).ravel())
+
+
+        # L2 regularization
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.L[:, :-1]))
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.R[:, :-1]))
+
+        # we need strictly maintain UserOuter and ItemOuter be ones, just to ensure they properly
+        # outer products with biases
+        #C = 10
         #loglik -= C * T.sum(T.abs_(self.L[:, -2] - SCONST))
         #loglik -= C * T.sum(T.abs_(self.R[:, -1] - SCONST))
 
@@ -810,9 +983,9 @@ if __name__ == "__main__":
     print("{} users, {} items".format(*mat.shape))
     print("number of nonzero entries: {}".format(mat.size))
 
-    num_factors = 5
+    num_factors = 20
 
-    n_iters = 50
+    n_iters = 200
     wmf = WildLogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
     lmf = LogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
     rlmf = RiemannianLogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
@@ -829,15 +1002,16 @@ if __name__ == "__main__":
     user_b = rnd.randn(M, 1) / SCONST
     item_b = rnd.randn(N, 1) / SCONST
 
+    print("train 2 factor Wild Logistic MF")
+    wmf.train_model(x0=(np.hstack((left, user_b)),
+                        np.hstack((right, item_b))))
+    print("end of training.")
 
     print("train 2 factor Riemannian Logistic MF:")
     rlmf.train_model(x0=(left, right))
     print("end of training.")
 
-    print("train 2 factor Wild Logistic MF")
-    wmf.train_model(x0=(np.hstack((left, user_ones, user_b)),
-                        np.hstack((right, item_b, item_ones))))
-    print("end of training.")
+
 
     #print("train 3 factor Riemannian Logistic MF:")
     #frlmf.train_model(x0=(u, s, v))
@@ -848,9 +1022,10 @@ if __name__ == "__main__":
     print("end of training.")
 
 
-    llmf, llrmf, llfrmf = lmf.loss_history, rlmf.loss_history, wmf.loss_history
+    begin = 50
+    llmf, llrmf, llfrmf = lmf.loss_history[begin:], rlmf.loss_history[begin:], wmf.loss_history[begin:]
     plt.plot(np.arange(len(llmf)), llmf, 'r')
-    plt.plot(np.arange(len(llrmf)), llrmf, 'g')
+    #plt.plot(np.arange(len(llrmf)), llrmf, 'g')
     plt.plot(np.arange(len(llfrmf)), -np.array(llfrmf), 'b')
-    plt.legend(['Alternating', 'GH^T', 'CG'], loc=2)
+    plt.legend(['Alternating', 'CG'], loc=2)
     plt.show()

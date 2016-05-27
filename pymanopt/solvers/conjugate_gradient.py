@@ -92,6 +92,8 @@ class ConjugateGradient(Solver):
         stepsize = np.nan
         time0 = time.time()
 
+        loss_history = []
+
         if self._verbosity >= 1:
             print "Optimizing..."
         if self._verbosity >= 2:
@@ -100,6 +102,7 @@ class ConjugateGradient(Solver):
         # Calculate initial cost-related quantities
         #print("objective(x):{}".format(objective(x)))
         cost = objective(x)
+        loss_history.append(cost)
         grad = gradient(x)
         gradnorm = man.norm(x, grad)
         Pgrad = grad  # TODO: Pgrad = precondition(x, grad)
@@ -201,6 +204,7 @@ class ConjugateGradient(Solver):
             # Update the necessary variables for the next iteration.
             x = newx
             cost = newcost
+            loss_history.append(cost)
             grad = newgrad
             Pgrad = Pnewgrad
             gradnorm = newgradnorm
@@ -208,4 +212,4 @@ class ConjugateGradient(Solver):
 
             iter += 1
 
-        return x
+        return x, loss_history

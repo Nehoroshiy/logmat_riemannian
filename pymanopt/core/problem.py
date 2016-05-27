@@ -69,7 +69,12 @@ class Problem:
                 self.cost = lambda x: self._cost(*x)
             else:
                 self.cost = self._cost
-            
+        #N = 100
+        #print(self.cost((np.random.randn(359349, 4), np.random.randn(160168, 4))).shape)
+        #xxx = self.cost((np.random.randn(N, 5), np.random.randn(N, 5)))
+        #print(type(xxx))
+        #print(xxx)
+        #print(xxx.shape)
 
         if need_grad and self.grad is None:
             if need_hess and self.hess is None:

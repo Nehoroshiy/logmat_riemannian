@@ -14,7 +14,7 @@ import theano.tensor as T
 from theano.tensor import slinalg
 from pymanopt import Problem
 from pymanopt.manifolds import FixedRankEmbeeded2Factors, FixedRankEmbeeded
-from pymanopt.solvers import TrustRegions, ConjugateGradient, SteepestDescent
+from pymanopt.solvers import TrustRegions, ConjugateGradient, SteepestDescent, BarzilaiBorwein
 
 import matplotlib.pyplot as plt
 
@@ -130,7 +130,7 @@ class LogisticMF():
         self.reg_param = reg_param
         self.gamma = gamma
 
-    def train_model_adagrad(self, x0=None):
+    def train_model_old(self, x0=None):
         self.loss_history = []
         self.ones = np.ones((self.num_users, self.num_items))
         if x0 is None:
@@ -138,10 +138,10 @@ class LogisticMF():
                                                        self.num_factors))
             self.item_vectors = np.random.normal(size=(self.num_items,
                                                        self.num_factors))
+            self.user_biases = np.random.normal(size=(self.num_users, 1))
+            self.item_biases = np.random.normal(size=(self.num_items, 1))
         else:
-            self.user_vectors, self.item_vectors = x0
-        self.user_biases = np.random.normal(size=(self.num_users, 1))
-        self.item_biases = np.random.normal(size=(self.num_items, 1))
+            self.user_vectors, self.item_vectors, self.user_biases, self.user_vectors = x0
 
         user_vec_deriv_sum = np.zeros((self.num_users, self.num_factors))
         item_vec_deriv_sum = np.zeros((self.num_items, self.num_factors))
@@ -182,13 +182,13 @@ class LogisticMF():
         self.ones = np.ones((self.num_users, self.num_items))
         if x0 is None:
             self.user_vectors = np.random.normal(size=(self.num_users,
-                                                   self.num_factors))
+                                                       self.num_factors))
             self.item_vectors = np.random.normal(size=(self.num_items,
-                                                   self.num_factors))
+                                                       self.num_factors))
+            self.user_biases = np.random.normal(size=(self.num_users, 1))
+            self.item_biases = np.random.normal(size=(self.num_items, 1))
         else:
-            self.user_vectors, self.item_vectors = x0
-        self.user_biases = np.random.normal(size=(self.num_users, 1))
-        self.item_biases = np.random.normal(size=(self.num_items, 1))
+            self.user_vectors, self.item_vectors, self.user_biases, self.item_biases = x0
 
         user_vec_deriv_sum = np.zeros((self.num_users, self.num_factors))
         item_vec_deriv_sum = np.zeros((self.num_items, self.num_factors))
@@ -617,9 +617,94 @@ class RiemannianLogisticMF():
         item_vecs_file.close()
 
 
-class WildLogisticMF():
+class BBLogisticMF():
     def __init__(self, counts, num_factors, reg_param=0.6, gamma=1.0,
                  iterations=30, minstepsize=1e-9):
+        self.counts = counts
+        self.num_users = self.counts.shape[0]
+        self.num_items = self.counts.shape[1]
+        self.num_factors = num_factors
+        self.iterations = iterations
+        self.minstepsize = minstepsize
+        self.reg_param = reg_param
+        self.gamma = gamma
+        self._bootstrap_problem()
+
+    def _bootstrap_problem(self):
+        self.manifold = FixedRankEmbeeded2Factors(self.num_users, self.num_items, self.num_factors + 1)
+        self.solver = BarzilaiBorwein(maxiter=self.iterations, minstepsize=self.minstepsize)
+
+    def train_model(self, x0=None):
+        self.L = T.matrix('L')
+        self.R = T.matrix('R')
+        problem = Problem(man=self.manifold,
+                          theano_cost=self.log_likelihood(),
+                          theano_arg=[self.L, self.R])
+
+        if x0 is None:
+            user_vectors = np.random.normal(size=(self.num_users,
+                                                       self.num_factors))
+            item_vectors = np.random.normal(size=(self.num_items,
+                                                       self.num_factors))
+            user_biases = np.random.normal(size=(self.num_users, 1)) / SCONST
+            item_biases = np.random.normal(size=(self.num_items, 1)) / SCONST
+            x0 = (np.hstack((user_vectors, user_biases)),
+                  np.hstack((item_vectors, item_biases)))
+        else:
+            x0 = x0
+        (left, right), self.loss_history = self.solver.solve(problem, x=x0)
+
+        self.user_vectors = left[:, :-1]
+        self.item_vectors = right[:, :-1]
+        self.user_biases = left[:, -1]
+        self.item_biases = right[:, -1]
+        print('U norm: {}'.format(la.norm(self.user_vectors)))
+        print('V norm: {}'.format(la.norm(self.item_vectors)))
+
+    def log_likelihood(self):
+        Users = self.L[:, :-1]
+        Items = self.R[:, :-1]
+        UserBiases = self.L[:, -1].reshape((-1, 1))
+        ItemBiases = self.R[:, -1].reshape((-1, 1))
+
+        A = T.dot(self.L[:, :-1], (self.R[:, :-1]).T)
+        A = T.inc_subtensor(A[:, :], UserBiases)
+        A = T.inc_subtensor(A[:, :], ItemBiases.T)
+        B = A * self.counts
+        loglik = T.sum(B)
+
+        A = T.exp(A)
+        A += 1
+        A = T.log(A)
+
+        A = (self.counts + 1) * A
+        loglik -= T.sum(A)
+
+        # L2 regularization
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.L[:, :-1]))
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.R[:, :-1]))
+
+        # Return negation of LogLikelihood cause we will minimize cost
+        return -loglik
+
+    def print_vectors(self):
+        user_vecs_file = open('logmf-user-vecs-%i' % self.num_factors, 'w')
+        for i in range(self.num_users):
+            vec = ' '.join(map(str, self.user_vectors[i]))
+            line = '%i\t%s\n' % (i, vec)
+            user_vecs_file.write(line)
+        user_vecs_file.close()
+        item_vecs_file = open('logmf-item-vecs-%i' % self.num_factors, 'w')
+        for i in range(self.num_items):
+            vec = ' '.join(map(str, self.item_vectors[i]))
+            line = '%i\t%s\n' % (i, vec)
+            item_vecs_file.write(line)
+        item_vecs_file.close()
+
+
+class WildLogisticMF():
+    def __init__(self, counts, num_factors, reg_param=0.6, gamma=1.0,
+                 iterations=30, minstepsize=1e-10):
         self.counts = counts
         self.num_users = self.counts.shape[0]
         self.num_items = self.counts.shape[1]
@@ -656,120 +741,33 @@ class WildLogisticMF():
 
         self.user_vectors = left[:, :-1]
         self.item_vectors = right[:, :-1]
-        self.user_biases = left[:, -1]
-        self.item_biases = right[:, -1]
+        self.user_biases = left[:, -1].reshape((self.num_users, 1))
+        self.item_biases = right[:, -1].reshape((self.num_items, 1))
         print('U norm: {}'.format(la.norm(self.user_vectors)))
         print('V norm: {}'.format(la.norm(self.item_vectors)))
-
-
-
-    def evaluate_lowrank(self, U, V, item, fast=False):
-        if hasattr(item, '__len__') and len(item) == 2 and len(item[0]) == len(item[1]):
-            if fast:
-                rows = U[item[0], :]
-                cols = V[item[1], :]
-                data = (rows * cols).sum(1)
-                return data
-            else:
-                idx_argsort = item[0].argsort()
-                item = (item[0][idx_argsort], item[1][idx_argsort])
-
-                vals, idxs, counts = [theano.shared(it) for it in\
-                                      np.unique(item[0], return_index=True, return_counts=True)]
-                output = T.zeros(int(np.max(counts.get_value())))
-                it1 = theano.shared(item[1])
-
-                def process_partial_dot(row_idx, out, U, V, item):
-                    partial_dot = T.dot(U[vals[row_idx], :], V[item[idxs[row_idx]: idxs[row_idx] + counts[row_idx]], :].T)
-                    return T.set_subtensor(out[:counts[row_idx]], partial_dot)
-                parts, updates = theano.scan(fn=process_partial_dot,
-                                             outputs_info=output,
-                                             sequences=T.arange(vals.size),
-                                             non_sequences=[U, V, it1])
-                mask = np.ones((vals.get_value().size, int(np.max(counts.get_value()))))
-                for i, count in enumerate(counts.get_value()):
-                    mask[i, count:] = 0
-                return parts[theano.shared(mask).nonzero()].ravel()
-        else:
-            raise ValueError('__getitem__ now supports only indices set')
-
-    def ll_func(self):
-        loglik = 0
-        A = np.dot(self.user_vectors, self.item_vectors.T)
-        A += self.user_biases
-        A += self.item_biases.T
-        B = A * self.counts
-        loglik += np.sum(B)
-
-        #A = np.exp(A)
-        #A += self.ones
-
-        #A = np.log(A)
-        A = accurate_log_exp1(A)
-        A = (self.counts + 1) * A
-        loglik -= np.sum(A)
-
-        # L2 regularization
-        loglik -= 0.5 * self.reg_param * np.sum(np.square(self.user_vectors))
-        loglik -= 0.5 * self.reg_param * np.sum(np.square(self.item_vectors))
-        return loglik
 
     def log_likelihood(self):
         Users = self.L[:, :-1]
         Items = self.R[:, :-1]
         UserBiases = self.L[:, -1].reshape((-1, 1))
         ItemBiases = self.R[:, -1].reshape((-1, 1))
-        #UserOuter = self.L[:, -2]
-        #ItemOuter = self.R[:, -1]
 
-        ## A = T.dot(Users, Items.T)
-        ## A += UserBiases
-        ## A += ItemBiases.T
-        ## B = A * self.counts
-        ## loglik = T.sum(B)
         A = T.dot(self.L[:, :-1], (self.R[:, :-1]).T)
         A = T.inc_subtensor(A[:, :], UserBiases)
         A = T.inc_subtensor(A[:, :], ItemBiases.T)
         B = A * self.counts
         loglik = T.sum(B)
 
-        # A implicitly stored as self.L @ self.R.T
-        # loglik = T.sum(A * self.counts) => sum over nonzeros only
-        #print('nnz size: {}'.format(self.counts.nonzero()[0].size))
-        #loglik = T.dot(self.evaluate_lowrank(self.L, self.R, self.counts.nonzero(), fast=False),
-        #          np.array(self.counts[self.counts.nonzero()]).ravel())
-
         A = T.exp(A)
         A += 1
         A = T.log(A)
-        # There we use Taylor series ln(exp(x) + 1) = ln(2) + x/2 + x^2/8 + O(x^4) at x=0
-        # ln(2)
-        #const_term = (T.ones((self.num_users, 1)) * np.log(2), T.ones((self.num_items, 1)))
-        # x/2
-        #first_order_term = (0.5 * self.L, 0.5 * self.R)
-        # x^2/8
-        #second_order_term = hadamard((self.L, self.R), (self.L, self.R), self.num_factors)
-        #second_order_term = tuple(factor / 8.0 for factor in second_order_term)
-
-        #grouped_factors = list(zip(const_term, first_order_term, second_order_term))
-        #A = (T.concatenate(grouped_factors[0], axis=1), T.concatenate(grouped_factors[1], axis=1))
 
         A = (self.counts + 1) * A
         loglik -= T.sum(A)
-        #loglik -= sum_lowrank(A)
-        #loglik -= T.dot(self.evaluate_lowrank(A[0], A[1], self.counts.nonzero(), fast=False),
-        #          np.array(self.counts[self.counts.nonzero()]).ravel())
-
 
         # L2 regularization
         loglik -= 0.5 * self.reg_param * T.sum(T.square(self.L[:, :-1]))
         loglik -= 0.5 * self.reg_param * T.sum(T.square(self.R[:, :-1]))
-
-        # we need strictly maintain UserOuter and ItemOuter be ones, just to ensure they properly
-        # outer products with biases
-        #C = 10
-        #loglik -= C * T.sum(T.abs_(self.L[:, -2] - SCONST))
-        #loglik -= C * T.sum(T.abs_(self.R[:, -1] - SCONST))
 
         # Return negation of LogLikelihood cause we will minimize cost
         return -loglik
@@ -794,7 +792,7 @@ class UsvRiemannianLogisticMF():
         self.counts = counts
         self.num_users = self.counts.shape[0]
         self.num_items = self.counts.shape[1]
-        self.num_factors = num_factors + 1
+        self.num_factors = num_factors
         self.iterations = iterations
         self.minstepsize = minstepsize
         self.reg_param = reg_param
@@ -802,7 +800,7 @@ class UsvRiemannianLogisticMF():
         self._bootstrap_problem()
 
     def _bootstrap_problem(self):
-        self.manifold = FixedRankEmbeeded(self.num_users, self.num_items, self.num_factors)
+        self.manifold = FixedRankEmbeeded(self.num_users, self.num_items, self.num_factors + 1)
         self.solver = ConjugateGradient(maxiter=self.iterations, minstepsize=self.minstepsize)
 
     def train_model(self, x0=None):
@@ -811,71 +809,37 @@ class UsvRiemannianLogisticMF():
         self.V = T.matrix('V')
         problem = Problem(man=self.manifold,
                           theano_cost=self.log_likelihood(),
-                          theano_arg=[self.U, self.S, self.V.T])
+                          theano_arg=[self.U, self.S, self.V])
 
         if x0 is None:
-            user_vectors = la.qr(np.random.normal(size=(self.num_users,
-                                                       self.num_factors)))[0]
-            item_vectors = la.qr(np.random.normal(size=(self.num_items,
-                                                       self.num_factors)))[0]
-            s = rnd.random(self.num_factors)
-            s = np.sort(s)[::-1]
-            middle = np.diag(s)
-            x0 = (np.hstack((user_vectors, user_biases)),
-                  np.hstack((item_vectors, item_biases)))
+            user_vectors = np.random.normal(size=(self.num_users,
+                                                       self.num_factors + 1))
+            item_vectors = np.random.normal(size=(self.num_items,
+                                                       self.num_factors + 1))
+            s = rnd.random(self.num_factors + 1)
+            s[:-1] = np.sort(s[:-1])[::-1]
+
+            x0 = (user_vectors, np.diag(s), item_vectors.T)
         else:
             x0 = x0
-        (left, right), self.loss_history = self.solver.solve(problem, x=x0)
+        (left, middle, right), self.loss_history = self.solver.solve(problem, x=x0)
+        right = right.T
 
-        self.user_vectors = left[:, :-1]
-        self.item_vectors = right[:, :-1]
-        self.user_biases = left[:, -1]
-        self.item_biases = right[:, -1]
+        s_mid = np.diag(np.sqrt(np.diag(middle)[:-1]))
+        self.middle = s_mid
+
+
+        print('U norm: {}'.format(la.norm(left[:, :-1])))
+        print('V norm: {}'.format(la.norm(right[:, :-1])))
+        self.user_vectors = left[:, :-1].dot(s_mid)
+        self.item_vectors = right[:, :-1].dot(s_mid)
+        self.user_biases = left[:, -1] * np.sqrt(middle[-1, -1])
+        self.item_biases = right[:, -1] * np.sqrt(middle[-1, -1])
         print('U norm: {}'.format(la.norm(self.user_vectors)))
         print('V norm: {}'.format(la.norm(self.item_vectors)))
-        #print("how much user outer? {}".format(np.average(np.isclose(left[:, -2], 1))))
-        #print("how much item outer? {}".format(np.average(np.isclose(right[:, -1], 1))))
-        #print('user delta: {} in norm, {} in max abs'.format(la.norm(left[:, -2] - 1), np.max(np.abs(left[:, -2] - 1))))
-        #print('item delta: {} in norm, {} in max abs'.format(la.norm(right[:, -1] - 1), np.max(np.abs(right[:, -1] - 1))))
-        #C = 1000
-        #smm = C * np.sum(np.square(left[:, -2] - SCONST))
-        #smm += C * np.sum(np.square(right[:, -1] - SCONST))
-        #print('smm: {}'.format(smm))
-        #print('ll func: {}'.format(self.ll_func()))
+        print('LL: {}'.format(self._log_likelihood()))
 
-
-
-    def evaluate_lowrank(self, U, V, item, fast=False):
-        if hasattr(item, '__len__') and len(item) == 2 and len(item[0]) == len(item[1]):
-            if fast:
-                rows = U[item[0], :]
-                cols = V[item[1], :]
-                data = (rows * cols).sum(1)
-                return data
-            else:
-                idx_argsort = item[0].argsort()
-                item = (item[0][idx_argsort], item[1][idx_argsort])
-
-                vals, idxs, counts = [theano.shared(it) for it in\
-                                      np.unique(item[0], return_index=True, return_counts=True)]
-                output = T.zeros(int(np.max(counts.get_value())))
-                it1 = theano.shared(item[1])
-
-                def process_partial_dot(row_idx, out, U, V, item):
-                    partial_dot = T.dot(U[vals[row_idx], :], V[item[idxs[row_idx]: idxs[row_idx] + counts[row_idx]], :].T)
-                    return T.set_subtensor(out[:counts[row_idx]], partial_dot)
-                parts, updates = theano.scan(fn=process_partial_dot,
-                                             outputs_info=output,
-                                             sequences=T.arange(vals.size),
-                                             non_sequences=[U, V, it1])
-                mask = np.ones((vals.get_value().size, int(np.max(counts.get_value()))))
-                for i, count in enumerate(counts.get_value()):
-                    mask[i, count:] = 0
-                return parts[theano.shared(mask).nonzero()].ravel()
-        else:
-            raise ValueError('__getitem__ now supports only indices set')
-
-    def ll_func(self):
+    def _log_likelihood(self):
         loglik = 0
         A = np.dot(self.user_vectors, self.item_vectors.T)
         A += self.user_biases
@@ -883,75 +847,39 @@ class UsvRiemannianLogisticMF():
         B = A * self.counts
         loglik += np.sum(B)
 
-        #A = np.exp(A)
-        #A += self.ones
+        A = np.exp(A)
+        A += 1
 
-        #A = np.log(A)
-        A = accurate_log_exp1(A)
+        A = np.log(A)
         A = (self.counts + 1) * A
         loglik -= np.sum(A)
 
         # L2 regularization
-        loglik -= 0.5 * self.reg_param * np.sum(np.square(self.user_vectors))
-        loglik -= 0.5 * self.reg_param * np.sum(np.square(self.item_vectors))
+        loglik -= 0.5 * self.reg_param * np.sum(np.square(np.diag(self.middle)))
         return loglik
 
     def log_likelihood(self):
-        Users = self.L[:, :-1]
-        Items = self.R[:, :-1]
-        UserBiases = self.L[:, -1].reshape((-1, 1))
-        ItemBiases = self.R[:, -1].reshape((-1, 1))
-        #UserOuter = self.L[:, -2]
-        #ItemOuter = self.R[:, -1]
+        Users = self.U[:, :-1]
+        Middle = self.S
+        Items = self.V[:-1, :]
+        UserBiases = self.U[:, -1].reshape((-1, 1))
+        ItemBiases = self.V[-1, :].reshape((-1, 1))
 
-        ## A = T.dot(Users, Items.T)
-        ## A += UserBiases
-        ## A += ItemBiases.T
-        ## B = A * self.counts
-        ## loglik = T.sum(B)
-        A = T.dot(self.L[:, :-1], (self.R[:, :-1]).T)
-        A = T.inc_subtensor(A[:, :], UserBiases)
-        A = T.inc_subtensor(A[:, :], ItemBiases.T)
+        A = T.dot(T.dot(self.U[:, :-1], self.S[:-1, :-1]), self.V[:-1, :])
+        A = T.inc_subtensor(A[:, :], UserBiases * T.sqrt(self.S[-1, -1]))
+        A = T.inc_subtensor(A[:, :], ItemBiases.T * T.sqrt(self.S[-1, -1]))
         B = A * self.counts
         loglik = T.sum(B)
-
-        # A implicitly stored as self.L @ self.R.T
-        # loglik = T.sum(A * self.counts) => sum over nonzeros only
-        #print('nnz size: {}'.format(self.counts.nonzero()[0].size))
-        #loglik = T.dot(self.evaluate_lowrank(self.L, self.R, self.counts.nonzero(), fast=False),
-        #          np.array(self.counts[self.counts.nonzero()]).ravel())
 
         A = T.exp(A)
         A += 1
         A = T.log(A)
-        # There we use Taylor series ln(exp(x) + 1) = ln(2) + x/2 + x^2/8 + O(x^4) at x=0
-        # ln(2)
-        #const_term = (T.ones((self.num_users, 1)) * np.log(2), T.ones((self.num_items, 1)))
-        # x/2
-        #first_order_term = (0.5 * self.L, 0.5 * self.R)
-        # x^2/8
-        #second_order_term = hadamard((self.L, self.R), (self.L, self.R), self.num_factors)
-        #second_order_term = tuple(factor / 8.0 for factor in second_order_term)
-
-        #grouped_factors = list(zip(const_term, first_order_term, second_order_term))
-        #A = (T.concatenate(grouped_factors[0], axis=1), T.concatenate(grouped_factors[1], axis=1))
 
         A = (self.counts + 1) * A
         loglik -= T.sum(A)
-        #loglik -= sum_lowrank(A)
-        #loglik -= T.dot(self.evaluate_lowrank(A[0], A[1], self.counts.nonzero(), fast=False),
-        #          np.array(self.counts[self.counts.nonzero()]).ravel())
-
 
         # L2 regularization
-        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.L[:, :-1]))
-        loglik -= 0.5 * self.reg_param * T.sum(T.square(self.R[:, :-1]))
-
-        # we need strictly maintain UserOuter and ItemOuter be ones, just to ensure they properly
-        # outer products with biases
-        #C = 10
-        #loglik -= C * T.sum(T.abs_(self.L[:, -2] - SCONST))
-        #loglik -= C * T.sum(T.abs_(self.R[:, -1] - SCONST))
+        loglik -= 0.5 * self.reg_param * T.sum(T.square(T.diag(self.S)[:-1]))
 
         # Return negation of LogLikelihood cause we will minimize cost
         return -loglik
@@ -971,25 +899,47 @@ class UsvRiemannianLogisticMF():
         item_vecs_file.close()
 
 
-if __name__ == "__main__":
+def big_mat(M=10000, N=4000):
+    import os
+    folder_path = "lastfm-dataset-360K"
+    mat_path = os.path.join(folder_path, 'cut.tsv')
+    mat = load_matrix_sparse(mat_path, M, N)
+    mat = np.array(mat[:M, :N].todense())
+    mat.tofile(os.path.join(folder_path, 'mat.npfile'))
+
+
+def read_mat(M=5000, N=1000):
+    import os
+    folder_path = "lastfm-dataset-360K"
+    mat = np.fromfile(os.path.join(folder_path, 'mat.npfile'), dtype=np.float).reshape((5000, 1000))
+    return mat[:M, :N].copy()
+
+def train_test_divide(mat, percent=0.9):
+    M, N = mat.shape
+    test_set = np.array(rnd.binomial(1.0, 1.0 - percent, size=M * N), dtype=bool)
+    test_set_mat = np.unravel_index(test_set, (M, N))
+    test_val_mat = mat[test_set_mat].copy()
+    mat[test_set_mat] = 0
+    return test_set_mat, test_val_mat
+
+
+def comparison():
     import os
     folder_path = "lastfm-dataset-360K"
     mat_path = os.path.join(folder_path, 'cut.tsv')
 
-    M, N = 1000, 1000
+    M, N = 10000, 2000
 
     mat = load_matrix_sparse(mat_path, M, N)
     mat = np.array(mat[:M, :N].todense())
     print("{} users, {} items".format(*mat.shape))
     print("number of nonzero entries: {}".format(mat.size))
 
-    num_factors = 20
+    num_factors = 5
 
-    n_iters = 200
+    n_iters = 100
     wmf = WildLogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
     lmf = LogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
-    rlmf = RiemannianLogisticMF(mat, num_factors, reg_param=0.6, gamma=1.0, iterations=n_iters)
-    frlmf = FixedRiemannianLogisticMF(mat, num_factors, reg_param=0.6*1e-2, gamma=1.0, iterations=n_iters)
 
     left, right = np.random.randn(M, num_factors), np.random.randn(N, num_factors)
     x0 = left.dot(right.T)
@@ -997,35 +947,93 @@ if __name__ == "__main__":
     u = u[:, :num_factors]
     s = np.diag(s[:num_factors])
     v = v[:num_factors, :]
-    user_ones = np.ones((M, 1)) * SCONST
-    item_ones = np.ones((N, 1)) * SCONST
-    user_b = rnd.randn(M, 1) / SCONST
-    item_b = rnd.randn(N, 1) / SCONST
+    user_ones = np.ones((M, 1))
+    item_ones = np.ones((N, 1))
+    user_b = rnd.randn(M, 1)
+    item_b = rnd.randn(N, 1)
+
+    ss = la.norm(user_b) * la.norm(item_b)
+    u = np.hstack([u, user_b / la.norm(user_b)])
+    s = np.diag(np.concatenate((np.diag(s), [ss])))
+    v = np.hstack([v.T, item_b / la.norm(item_b)]).T
+
 
     print("train 2 factor Wild Logistic MF")
     wmf.train_model(x0=(np.hstack((left, user_b)),
                         np.hstack((right, item_b))))
     print("end of training.")
 
-    print("train 2 factor Riemannian Logistic MF:")
-    rlmf.train_model(x0=(left, right))
-    print("end of training.")
-
-
-
-    #print("train 3 factor Riemannian Logistic MF:")
-    #frlmf.train_model(x0=(u, s, v))
-    #print("end of training.")
-
     print("train Logistic MF:")
     lmf.train_model(x0=(left, right))
     print("end of training.")
 
 
-    begin = 50
-    llmf, llrmf, llfrmf = lmf.loss_history[begin:], rlmf.loss_history[begin:], wmf.loss_history[begin:]
+    begin = 0
+    llmf, llwmf = lmf.loss_history[begin:], wmf.loss_history[begin:]
     plt.plot(np.arange(len(llmf)), llmf, 'r')
-    #plt.plot(np.arange(len(llrmf)), llrmf, 'g')
-    plt.plot(np.arange(len(llfrmf)), -np.array(llfrmf), 'b')
-    plt.legend(['Alternating', 'CG'], loc=2)
+    plt.plot(np.arange(len(llwmf)), -np.array(llwmf), 'g')
+    plt.legend(['Alternating','CG'], loc=2)
     plt.show()
+
+
+def train_model(mat, x0=None, reg_param=0.6, gamma=1.0, num_factors=5, n_iters=30, baseline=True):
+    if baseline:
+        model = LogisticMF(mat, num_factors, reg_param=reg_param, gamma=gamma, iterations=n_iters)
+    else:
+        model = WildLogisticMF(mat, num_factors, reg_param=reg_param, gamma=gamma, iterations=n_iters)
+
+    model.train_model(x0=x0)
+    return model
+
+
+def rank(mat):
+    return np.argsort(mat, 1)[:, ::-1]
+
+
+if __name__ == "__main__":
+    M, N = 5000, 1000
+    max_factors = 20
+    n_iters = 30
+    mat = read_mat(M, N)
+    test_set, test_val = train_test_divide(mat)
+
+    mpr_lmf = []
+    mpr_wmf = []
+
+    for num_factors in range(1, max_factors + 1):
+        rep_lmf = []
+        rep_wmf = []
+        for rep in range(3):
+            left, right = np.random.randn(M, num_factors), np.random.randn(N, num_factors)
+            user_b, item_b = rnd.normal(size=(M, 1)), rnd.normal(size=(N, 1))
+
+            lmf_model = train_model(mat, x0=(left.copy(), right.copy(), user_b.copy(), item_b.copy()), num_factors=num_factors, n_iters=n_iters)
+            wmf_model = train_model(mat,
+                                    x0=(np.hstack((left.copy(), user_b.copy())), np.hstack((right.copy(), item_b.copy()))),
+                                    num_factors=num_factors,
+                                    n_iters=n_iters,
+                                    baseline=False)
+
+            lmf_mat = lmf_model.user_vectors.dot(lmf_model.item_vectors.T)
+            lmf_mat += lmf_model.user_biases
+            lmf_mat += lmf_model.item_biases.T
+
+            wmf_mat = wmf_model.user_vectors.dot(wmf_model.item_vectors.T)
+            wmf_mat += wmf_model.user_biases
+            wmf_mat += wmf_model.item_biases.T
+
+            lmf_rank = rank(lmf_mat)
+            wmf_rank = rank(wmf_mat)
+            lmf_rank = (100.0 / N) * lmf_rank
+            wmf_rank = (100.0 / N) * wmf_rank
+
+            rep_lmf.append(np.dot(test_val, lmf_rank[test_set]) / np.sum(test_val))
+            rep_wmf.append(np.dot(test_val, wmf_rank[test_set]) / np.sum(test_val))
+        mpr_lmf.append(np.average(rep_lmf))
+        mpr_wmf.append(np.average(rep_wmf))
+        print('-'*80)
+        print('current lmf: {}'.format(mpr_lmf[-1]))
+        print('current wmf: {}'.format(mpr_wmf[-1]))
+        print('-'*80)
+        np.savetxt('lmf_data.txt', np.array(mpr_lmf))
+        np.savetxt('wmf_data.txt', np.array(mpr_wmf))
